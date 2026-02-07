@@ -1,0 +1,1 @@
+生成完整的 STM32G4 裸机 GPIO 闪烁驱动。PA5 LED, 1Hz。使用 CMSIS 寄存器访问（无 HAL）。包含 main.c, startup, linker script。

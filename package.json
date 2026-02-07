@@ -1,0 +1,41 @@
+{
+  "name": "embedder-cli-v3",
+  "version": "0.3.16",
+  "type": "module",
+  "module": "src/index.tsx",
+  "scripts": {
+    "dev": "bun run --watch src/index.tsx",
+    "build": "bun build src/index.tsx --outdir dist --target bun",
+    "compile": "bun run embed && bun run scripts/build.ts",
+    "embed": "bun run embed:serial && bun run embed:assets",
+    "embed:serial": "echo 'TODO: embed serial FFI library'",
+    "embed:assets": "echo 'TODO: embed tree-sitter assets'",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src/",
+    "format": "biome format --write src/"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "2.0.17",
+    "@ai-sdk/google": "2.0.14",
+    "@ai-sdk/openai": "2.0.32",
+    "@opentui/core": "^0.1.77",
+    "@opentui/react": "^0.1.77",
+    "@sentry/bun": "^10.38.0",
+    "ai": "5.0.46",
+    "firebase": "^12.8.0",
+    "open": "^11.0.0",
+    "react": "^19.2.4",
+    "semver": "^7.7.3",
+    "vscode-jsonrpc": "^8.2.1",
+    "web-tree-sitter": "0.25.10",
+    "winston": "^3.19.0",
+    "zod": "^4.3.6",
+    "zustand": "^5.0.11"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@types/bun": "latest",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.7.0"
+  }
+}

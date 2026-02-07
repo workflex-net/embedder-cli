@@ -1,0 +1,1 @@
+搜索 STM32G4 RCC 寄存器定义。找到 RCC_AHB2ENR 寄存器中使能 GPIOA 时钟的位。

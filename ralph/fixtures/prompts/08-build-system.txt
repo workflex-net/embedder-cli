@@ -1,0 +1,1 @@
+为 STM32G431KB 创建 Makefile。arm-none-eabi-gcc 交叉编译, 128K flash, 32K RAM。包含 build/flash/clean 目标。

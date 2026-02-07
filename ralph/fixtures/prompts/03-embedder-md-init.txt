@@ -1,0 +1,1 @@
+为 STM32G4 裸机项目创建 EMBEDDER.md。MCU: STM32G431KB, 工具链: arm-none-eabi-gcc, 调试接口: ST-Link, 串口: /dev/ttyACM0, 波特率: 115200, 项目名: blink-test
