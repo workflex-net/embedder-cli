@@ -43,9 +43,63 @@ const theirsDir = await mkdtemp(join(tmpdir(), "ralph-theirs-03-"));
 
 ## 第二步：并行启动两个 Claude Sonnet 实例
 
-`agent.ts` 通过 Claude Agent SDK 的 `query()` 启动两个独立的 Claude Code 子进程。
+### 实际调用链
 
-**OurRunner** 收到的系统提示（`agent.ts:44-62`，我们重建的）：
+`agent.ts` 的 `runDualAgents()` 调用两次 `runAgent()`，**两者执行完全相同的代码路径**，区别仅在于系统提示字符串：
+
+```
+runDualAgents(prompt, {oursDir, theirsDir})
+  │
+  ├→ runAgent({ source: "ours" })
+  │    └→ query({
+  │         prompt: "为 STM32G4 裸机项目创建 EMBEDDER.md...",
+  │         systemPrompt: OUR_SYSTEM_PROMPT,         ← 我们重建的系统提示
+  │         cwd: "/tmp/ralph-ours-03-a8f2c1",
+  │         model: "claude-sonnet-4-20250514",
+  │         executable: "node",
+  │         pathToClaudeCodeExecutable: "/home/leo/.npm-global/bin/claude",
+  │       })
+  │         └→ SDK 启动子进程: node /home/leo/.npm-global/bin/claude
+  │              └→ Claude Code CLI 连接 Claude Sonnet API
+  │                   └→ 模型根据系统提示思考，调用 Write/Bash/Read 等工具
+  │                        └→ 文件写入 /tmp/ralph-ours-03-a8f2c1/
+  │
+  └→ runAgent({ source: "theirs" })
+       └→ query({
+            prompt: "为 STM32G4 裸机项目创建 EMBEDDER.md...",  ← 同一个 prompt
+            systemPrompt: REAL_SYSTEM_PROMPT,        ← 从 lib_app.js 提取的系统提示
+            cwd: "/tmp/ralph-theirs-03-b3d9e7",
+            model: "claude-sonnet-4-20250514",       ← 同一个模型
+            executable: "node",
+            pathToClaudeCodeExecutable: "/home/leo/.npm-global/bin/claude",  ← 同一个 CLI
+          })
+            └→ SDK 启动子进程: node /home/leo/.npm-global/bin/claude
+                 └→ 同一个 Claude Code CLI 连同一个 Claude Sonnet API
+                      └→ 模型根据不同的系统提示思考，调用同样的工具集
+                           └→ 文件写入 /tmp/ralph-theirs-03-b3d9e7/
+```
+
+### 关键事实：两边都是 Claude Code，不是 embedder-cli
+
+真实的 embedder-cli 二进制（`~/.embedder/bin/embedder`，130MB Bun 编译产物）**从未被调用**。
+`ralph.config.ts` 里声明了 `embedderBin` 路径，但 `agent.ts` 没有引用它：
+
+```typescript
+// ralph.config.ts — 声明了但未使用
+embedderBin: join(process.env.HOME ?? "/home/leo", ".embedder/bin/embedder"),
+
+// agent.ts — 两个 runner 都用 Claude Code CLI
+executable: config.claudeCodeExecutable,                    // "node"
+pathToClaudeCodeExecutable: config.claudeCodePath,          // "/home/leo/.npm-global/bin/claude"
+```
+
+embedder-cli 是交互式 TUI 程序（React + OpenTUI），无法直接传入 prompt 获取 tool 调用序列。
+它内部有自己的 16 个工具（FZB 集合）、自己的 agent 循环、自己的 UI 渲染层。
+要获取它的真实行为，理论上需要通过 Bash 调用它并解析输出，但目前没有这样做。
+
+### 两段系统提示的内容
+
+**OurRunner** — `agent.ts:44-62`，从 `src/` 骨架代码分析重建的：
 
 ```
 You are an embedded systems engineering assistant.
@@ -65,7 +119,7 @@ When working on embedded projects:
 5. Configure serial monitoring with correct port and baud rate
 ```
 
-**TheirRunner** 收到的系统提示（`agent.ts:17-39`，从 extracted/modules/lib_app.js 提取的）：
+**TheirRunner** — `agent.ts:17-39`，从 `extracted/modules/lib_app.js` 行 84-158 的 txB 变量提取的：
 
 ```
 You are an expert embedded systems engineer assistant called Embedder.
@@ -82,7 +136,22 @@ This file contains project-specific configuration including:
 - Serial monitor settings
 ```
 
-两者收到 **同一个 prompt**，工具集相同，cwd 分别是各自的空 tmpdir。
+注意：agent.ts 里的 REAL_SYSTEM_PROMPT 只是 txB 模板的一小部分摘要，并非完整的真实系统提示。
+完整的 txB 模板包含 EMBEDDER.md 的 `<OVERVIEW>`/`<COMMANDS>` 格式定义、工具使用规范等细节，
+这些在当前的 REAL_SYSTEM_PROMPT 中被省略了。
+
+### 结论
+
+`make ralph` 实际做的事是：
+
+> 给同一个 LLM（Claude Sonnet）通过同一个 CLI（Claude Code）发同一道题，
+> 一次用"我们重建的系统提示"，一次用"我们从 lib_app.js 摘抄的系统提示"，
+> 比较两次生成输出的文件结构差异。
+
+它验证的是 **两段系统提示文本的引导效果差异**，不是：
+- ~~验证 `src/` 里的 tool 实现是否正确~~
+- ~~验证真实 embedder-cli 二进制的实际行为~~
+- ~~对比我们的代码与原始代码的运行结果~~
 
 ---
 
@@ -317,6 +386,37 @@ await rm(theirsDir, { recursive: true, force: true });
 
 ## 此例暴露的问题
 
+### 根本性问题：没有调用真实 embedder-cli
+
+真实的 embedder-cli 二进制包（`~/.embedder/bin/embedder`，130MB Bun 编译产物）**从未被调用**。
+
+```
+ralph.config.ts 里声明了路径，但 agent.ts 没有引用：
+
+  // ralph.config.ts — 声明了但未使用
+  embedderBin: "/home/leo/.embedder/bin/embedder"
+
+  // agent.ts — 两个 runner 都调用 Claude Code CLI
+  pathToClaudeCodeExecutable: "/home/leo/.npm-global/bin/claude"
+```
+
+embedder-cli 是一个交互式 TUI 程序（React + OpenTUI），内部有自己的 16 个工具（FZB 集合）、
+自己的 agent 循环、自己的 UI 渲染层。它不能简单地传入 prompt 获取 tool 调用序列。
+要获取它的真实行为，理论上需要通过 Bash 调用并解析输出，但目前没有这样做。
+
+因此 `make ralph` 实际做的事是：
+
+> 给同一个 LLM（Claude Sonnet）通过同一个 CLI（Claude Code）发同一道题，
+> 一次用"我们重建的系统提示"，一次用"我们从 lib_app.js 摘抄的系统提示"，
+> 比较两次生成输出的文件结构差异。
+
+它验证的是 **两段系统提示文本的引导效果差异**，不是：
+- ~~验证 `src/` 里的 tool 实现是否正确~~
+- ~~验证真实 embedder-cli 二进制的实际行为~~
+- ~~对比我们的代码与原始代码的运行结果~~
+
+### 其他问题
+
 | 问题 | 说明 |
 |------|------|
 | **artifacts 路径混乱** | hook 记录绝对路径 `/tmp/ralph-ours-03-xxx/EMBEDDER.md`，workspace scan 记录相对路径 `EMBEDDER.md`，同一个文件出现两个 key。绝对路径永远匹配不上对面的，被当成 `added`/`removed` 拉低 similarity |
@@ -324,3 +424,4 @@ await rm(theirsDir, { recursive: true, force: true });
 | **validation 依赖 LLM 碰运气** | OurRunner 是否生成 `<OVERVIEW>` 取决于 Claude 当次的随机输出，不取决于 `src/` 代码是否正确实现了 init_project 工具 |
 | **循环重跑无收敛** | 每轮配置完全不变（相同系统提示 + 相同 prompt），纯靠 LLM 非确定性碰通过 |
 | **similarity 易受干扰** | 绝对路径 artifact 导致分母膨胀，真实文件匹配被 added/removed 稀释 |
+| **REAL_SYSTEM_PROMPT 不完整** | agent.ts 里的 TheirRunner 系统提示只是 txB 模板的摘要，省略了 `<OVERVIEW>`/`<COMMANDS>` 格式定义等关键细节，导致 theirs 的输出也不一定包含这些标记 |
