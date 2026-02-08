@@ -1,5 +1,21 @@
 #!/usr/bin/env bun
 
+// Catch stray unhandled rejections from SDK internals (abort/close race conditions)
+// Without this, the SDK's internal write/handleControlRequest abort errors crash the process.
+process.on("unhandledRejection", (reason: unknown) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  const isAbort =
+    msg.includes("abort") || msg.includes("Abort") || msg.includes("Operation aborted");
+  if (isAbort) {
+    // Suppress SDK abort errors — these are expected during timeout/close
+    console.error(`  [suppressed] SDK abort: ${msg}`);
+    return;
+  }
+  // Re-throw non-abort unhandled rejections
+  console.error("Unhandled rejection:", reason);
+  process.exit(1);
+});
+
 import { parseArgs } from "util";
 import type { ScenarioDefinition, RunResult } from "./lib/types";
 import { executeScenarios } from "./lib/harness";

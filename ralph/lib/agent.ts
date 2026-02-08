@@ -83,25 +83,22 @@ export async function runAgent(options: RunnerOptions): Promise<ScenarioResult> 
   const systemPrompt = source === "theirs" ? REAL_SYSTEM_PROMPT : OUR_SYSTEM_PROMPT;
 
   const abortController = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-
-  let timedOut = false;
-  if (timeout) {
-    timer = setTimeout(() => {
-      timedOut = true;
-      abortController.abort();
-    }, timeout);
-  }
-
   const stderrLines: string[] = [];
+  let timedOut = false;
 
   // Clean env: remove nested Claude Code session markers
   const cleanEnv = { ...process.env };
   delete cleanEnv.CLAUDECODE;
   delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
 
+  // We'll set the timer AFTER creating `q` so we can call q.close() directly
+  // instead of abortController.abort() — the latter causes the SDK's internal
+  // write/handleControlRequest to throw an unhandled "Operation aborted" error.
+  let q: ReturnType<typeof query> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
   try {
-    const q = query({
+    q = query({
       prompt,
       options: {
         systemPrompt,
@@ -125,8 +122,12 @@ export async function runAgent(options: RunnerOptions): Promise<ScenarioResult> 
                 async (
                   input: HookInput,
                   _toolUseID: string | undefined,
-                  _options: { signal: AbortSignal },
+                  hookOpts: { signal: AbortSignal },
                 ): Promise<HookJSONOutput> => {
+                  // If already aborted, bail out immediately
+                  if (hookOpts.signal.aborted || timedOut) {
+                    return { continue: true };
+                  }
                   if (input.hook_event_name === "PostToolUse") {
                     capture.recordToolCall(
                       input.tool_name ?? "unknown",
@@ -144,6 +145,18 @@ export async function runAgent(options: RunnerOptions): Promise<ScenarioResult> 
         },
       },
     });
+
+    // Set up timeout AFTER q is created — use q.close() for graceful shutdown
+    if (timeout) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        try { q?.close(); } catch { /* ignore */ }
+        // Only abort as a last resort, after close
+        setTimeout(() => {
+          try { abortController.abort(); } catch { /* ignore */ }
+        }, 2000);
+      }, timeout);
+    }
 
     try {
       for await (const message of q) {
@@ -188,14 +201,14 @@ export async function runAgent(options: RunnerOptions): Promise<ScenarioResult> 
     } catch (iterErr) {
       // Handle abort/timeout errors from the message iterator
       const msg = iterErr instanceof Error ? iterErr.message : String(iterErr);
-      const isAbort = msg.includes("abort") || msg.includes("Abort") || timedOut;
+      const isAbort =
+        msg.includes("abort") || msg.includes("Abort") || msg.includes("Operation aborted") || timedOut;
       if (isAbort) {
         capture.recordError(timedOut ? `Timed out after ${timeout}ms` : "Aborted");
       } else {
         capture.recordError(msg);
       }
-      // Try to close the query cleanly
-      try { q.close(); } catch { /* ignore */ }
+      try { q?.close(); } catch { /* ignore */ }
     }
 
     return {
@@ -209,10 +222,10 @@ export async function runAgent(options: RunnerOptions): Promise<ScenarioResult> 
     };
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
-    const isAbort = error.includes("abort") || error.includes("Abort") || timedOut;
+    const isAbort =
+      error.includes("abort") || error.includes("Abort") || error.includes("Operation aborted") || timedOut;
     capture.recordError(isAbort ? `Timed out after ${timeout}ms` : error);
 
-    // Include stderr for debugging (only if not just a timeout)
     if (!isAbort && stderrLines.length > 0) {
       const stderrSummary = stderrLines.slice(-5).join("\n");
       capture.recordError(`stderr: ${stderrSummary}`);
@@ -229,6 +242,8 @@ export async function runAgent(options: RunnerOptions): Promise<ScenarioResult> 
     };
   } finally {
     if (timer) clearTimeout(timer);
+    // Final cleanup: ensure the query is closed
+    try { q?.close(); } catch { /* ignore */ }
   }
 }
 
@@ -241,7 +256,7 @@ export async function runDualAgents(
   allowedTools: string[],
   options?: { maxTurns?: number; timeout?: number },
 ): Promise<{ ours: ScenarioResult; theirs: ScenarioResult }> {
-  const [ours, theirs] = await Promise.all([
+  const [oursSettled, theirsSettled] = await Promise.allSettled([
     runAgent({
       source: "ours",
       prompt,
@@ -259,6 +274,23 @@ export async function runDualAgents(
       timeout: options?.timeout,
     }),
   ]);
+
+  const makeFailed = (source: "ours" | "theirs", reason: unknown): ScenarioResult => ({
+    scenarioId: "",
+    source,
+    success: false,
+    duration: 0,
+    toolCalls: [],
+    artifacts: {},
+    errors: [reason instanceof Error ? reason.message : String(reason)],
+  });
+
+  const ours = oursSettled.status === "fulfilled"
+    ? oursSettled.value
+    : makeFailed("ours", oursSettled.reason);
+  const theirs = theirsSettled.status === "fulfilled"
+    ? theirsSettled.value
+    : makeFailed("theirs", theirsSettled.reason);
 
   return { ours, theirs };
 }
